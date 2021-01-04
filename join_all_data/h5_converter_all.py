@@ -15,10 +15,10 @@ from loaders.seriesloader import load_dicom_series
 """ The final h5 file is basically the same as before but in each group ProstateX-AAAA there's a new dataset Ktrans_0."""
 
 def dicom_to_h5(root_dir, h5):
-    sub_dirs = [x[0] for x in os.walk(root_dir)]  # Gather all subdirectories in 'root_dir'
+    sub_dirs = sorted([x[0] for x in os.walk(root_dir)])  # Gather all subdirectories in 'root_dir'
     ages = {}
     for directory in sub_dirs:
-        # print(directory)
+        print(directory)
         if directory.split(os.sep)[-1] == 'Ktrans': #if the file is from Ktrans, look for the .mhd
             Im_Ktrans = True
             file_list = glob.glob(directory + '/*.mhd')
@@ -79,9 +79,9 @@ def dicom_to_h5(root_dir, h5):
 
 
 def train_csv_to_h5(csv_file, h5):
-    with open(csv_file, 'rb') as f:
+    with open(csv_file, 'r') as f:
         reader = csv.reader(f, delimiter=',')
-        reader.next()  # Skip column names
+        next(reader)  # Skip column names
         for row in reader:
             patient_id = row[0]
             name = row[1]
@@ -126,15 +126,15 @@ if __name__ == "__main__":
     # Example usage
     if train_set:
         h5file = h5py.File('prostatex-train-ALL.hdf5', 'w')
-        main_folder = 'C:\\Users\\User\\Mis Documentos\\Mine\\Trabajo\\Uni\\RU\\2ndS-ISMI\\Project\\Data\\Training'
-        data_folder = main_folder + '\\All_training_data'
-        images_csv = main_folder + '\\ProstateX-TrainingLesionInformationv2\\ProstateX-Images-Train-ALL.csv'
+        main_folder = '/Users/mrsata/Desktop/radiology/ProstateX-Train'
+        data_folder = main_folder + '/All_training_data'
+        images_csv = main_folder + '/ProstateX-Images-Train-ALL.csv'
 
     else:
-        h5file = h5py.File('prostatex-test-ALL.hdf5', 'w')y
-        main_folder = 'C:\\Users\\User\\Mis Documentos\\Mine\\Trabajo\\Uni\\RU\\2ndS-ISMI\\Project\\Data\\Test'
-        data_folder = main_folder + '\\All_test_data'
-        images_csv = main_folder + '\\ProstateX-TestLesionInformation\\ProstateX-Images-Test-ALL.csv'
+        h5file = h5py.File('prostatex-test-ALL.hdf5', 'w')
+        main_folder = '/Users/mrsata/Desktop/radiology/ProstateX-Test'
+        data_folder = main_folder + '/All_test_data'
+        images_csv = main_folder + '/ProstateX-Images-Test-ALL.csv'
 
     dicom_to_h5(data_folder, h5file)
     train_csv_to_h5(images_csv, h5file)

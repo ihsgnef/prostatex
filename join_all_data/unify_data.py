@@ -19,13 +19,15 @@ import os
 
 """ This is done because it makes life easier to convert all to HDF5"""
 
-train_set = False #Denotes whether we are joining the training or the test data
+train_set = True #Denotes whether we are joining the training or the test data
 
-main_path = 'C:\\Users\\User\\Mis Documentos\\Mine\\Trabajo\\Uni\\RU\\2ndS-ISMI\\Project\\Data\\Test'
+main_path = '/Users/mrsata/Desktop/radiology/ProstateX-Train'
 
 """" Get all directories from the Ktrans dir and also the ones from DOI, but only up to \ProstateX-aaaa """
-sub_dirs_src1 = [x[0] for x in os.walk(main_path + '\\DOI') if x[0].split(os.sep)[-1].split('-')[0] == 'ProstateX']
-sub_dirs_src2 = [x[0] for x in os.walk(main_path + '\\Ktrans') if x[0].split(os.sep)[-1].split('-')[0] == 'ProstateX']
+sub_dirs_src1 = sorted([x[0] for x in os.walk(main_path + '/DOI') \
+    if x[0].split(os.sep)[-1].split('-')[0] == 'ProstateX'])
+sub_dirs_src2 = sorted([x[0] for x in os.walk(main_path + '/Ktrans') \
+    if x[0].split(os.sep)[-1].split('-')[0] == 'ProstateX'])
 
 #print len(sub_dirs_src1), len(sub_dirs_src2)
 
@@ -36,29 +38,29 @@ aux_lst1 = [x.split(os.sep)[-1] for x in sub_dirs_src1 if x.split(os.sep)[-1] no
 
 if aux_lst1:
     for case in aux_lst1:
-        doi_dir = main_path + '\\DOI\\' + case
-        ktrans_dir = main_path + '\\Ktrans\\' + case
+        doi_dir = main_path + '/DOI/' + case
+        ktrans_dir = main_path + '/Ktrans/' + case
         os.makedirs(ktrans_dir)
         sub_dirs_src2.insert(sub_dirs_src1.index(doi_dir), ktrans_dir)
 
-print len(sub_dirs_src1), len(sub_dirs_src2)
+print(len(sub_dirs_src1), len(sub_dirs_src2))
 
 #for i in range(len(sub_dirs_src1)):
 #    print sub_dirs_src1[i].split(os.sep)[-1] == sub_dirs_src2[i].split(os.sep)[-1]
 
 num_cases = len(sub_dirs_src1)
 case_0 = int(sub_dirs_src1[0].split(os.sep)[-1].split('-')[-1])
-#print case_0
+print(case_0,sub_dirs_src1[0])
 
 i = 0
 while i < num_cases:
     patient_id = 'ProstateX-' + format(i + case_0, '04d')
-    print patient_id
+    print(patient_id)
     if train_set:
-        shutil.copytree(sub_dirs_src1[i], main_path + '\\All_training_data\\' + patient_id)
-        shutil.copytree(sub_dirs_src2[i], main_path + '\\All_training_data\\' + patient_id + '\\Ktrans')
+        shutil.copytree(sub_dirs_src1[i], main_path + '/All_training_data/' + patient_id)
+        shutil.copytree(sub_dirs_src2[i], main_path + '/All_training_data/' + patient_id + '/Ktrans')
     else:
-        shutil.copytree(sub_dirs_src1[i], main_path + '\\All_test_data\\' + patient_id)
-        shutil.copytree(sub_dirs_src2[i], main_path + '\\All_test_data\\' + patient_id + '\\Ktrans')
+        shutil.copytree(sub_dirs_src1[i], main_path + '/All_test_data/' + patient_id)
+        shutil.copytree(sub_dirs_src2[i], main_path + '/All_test_data/' + patient_id + '/Ktrans')
     #print i
     i += 1
