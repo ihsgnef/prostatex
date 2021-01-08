@@ -17,40 +17,39 @@ from pytorch_lightning.loggers import WandbLogger
 import wandb
 wandb.init(
     project="prostatex", 
-    group="resnet-adc-t10",
+    group="resnet-adc-t11",
     config={
         "loss": "binary_cross_entropy",
         "metric": "accuracy",
         "optimizer": "Adam",
-        "lr":0.01,
-        "epoch": 20,
-        "batch_size": 128
+        "lr":0.001,
+        "epoch": 1000,
+        "batch_size": 32
         })
 wandblogger = WandbLogger()
 
 ## Data
 h5_file_location = os.path.join('./','prostatex-train-ALL.hdf5')
 h5_file = h5py.File(h5_file_location, 'r')
-train_data_list, train_labels_list, attr = get_train_data(h5_file, ['ADC'])
+train_data_list, train_labels_list, attr = get_train_data(h5_file, ['ADC', 'Ktrans'], size_px=32)
 train_data, val_data, train_labels, val_labels = train_test_split(
     train_data_list, train_labels_list, attr, test_size=0.25, random_state=0)
 
-train_data_tensor = torch.Tensor(train_data.astype(np.uint8))
+train_data_tensor = torch.Tensor(train_data.astype(np.float32))
 train_labels_tensor = torch.Tensor(train_labels)
-val_data_tensor = torch.Tensor(val_data.astype(np.uint8))
+val_data_tensor = torch.Tensor(val_data.astype(np.float32))
 val_labels_tensor = torch.Tensor(val_labels)
-pos_weight = train_labels_tensor.mean()
-
-transform = lambda x: transforms.functional.normalize(
-    transforms.functional.resize(x.unsqueeze(1).expand([-1, 3, -1, -1]), 224), 
-    [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+all_max = torch.max(train_data_tensor.max(), val_data_tensor.max())
+train_data_tensor = train_data_tensor.unsqueeze(dim=1).repeat([1, 3, 1, 1]) / all_max
+val_data_tensor = val_data_tensor.unsqueeze(dim=1).repeat([1, 3, 1, 1]) / all_max
+pos_weight = 1 / train_labels_tensor.mean()
 
 datasets = {}
-datasets["train"] = torch.utils.data.TensorDataset(transform(train_data_tensor), train_labels_tensor)
-datasets["val"] = torch.utils.data.TensorDataset(transform(val_data_tensor), val_labels_tensor)
+datasets["train"] = torch.utils.data.TensorDataset(train_data_tensor, train_labels_tensor)
+datasets["val"] = torch.utils.data.TensorDataset(val_data_tensor, val_labels_tensor)
 
 dataloaders = {x: torch.utils.data.DataLoader(datasets[x], batch_size=wandb.config.batch_size, 
-                                              num_workers=16)
+                                              num_workers=16, drop_last=True, shuffle=True)
               for x in ['train', 'val']}
 
 class Resnet18Classifier(pl.LightningModule):
@@ -60,9 +59,11 @@ class Resnet18Classifier(pl.LightningModule):
 
         # init a pretrained resnet
         self.feature_extractor = models.resnet18(pretrained=True)
-
+        self.feature_extractor.layer4 = nn.Identity()
+        self.feature_extractor.fc = nn.Identity()
+        
         # use the pretrained model to classify
-        num_ftrs = self.feature_extractor.fc.out_features
+        num_ftrs = 256
         self.classifier = nn.Linear(num_ftrs, 1)
         
         self.lr = wandb.config.lr
@@ -77,7 +78,7 @@ class Resnet18Classifier(pl.LightningModule):
         y_hat = self(x)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         loss = criterion(y_hat, y.unsqueeze(1))
-        acc = self.accuracy(torch.argmax(y_hat, dim=1), y)
+        acc = self.accuracy(F.sigmoid(y_hat), y)
         self.log('train_loss', loss, sync_dist=True)
         self.log('train_acc', acc)
         return loss
@@ -87,7 +88,7 @@ class Resnet18Classifier(pl.LightningModule):
         y_hat = self(x)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         loss = criterion(y_hat, y.unsqueeze(1))
-        acc = self.accuracy(torch.argmax(y_hat, dim=1), y)
+        acc = self.accuracy(F.sigmoid(y_hat), y)
         self.log('val_loss', loss, sync_dist=True)
         self.log('val_acc', acc)
 
