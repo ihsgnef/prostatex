@@ -17,12 +17,12 @@ from pytorch_lightning.loggers import WandbLogger
 import wandb
 wandb.init(
     project="prostatex", 
-    group="xmas-dak-aug-t1",
+    group="xmas-dak-cat-t2",
     config={
         "loss": "binary_cross_entropy",
         "metric": "accuracy",
         "optimizer": "Adam",
-        "lr":2e-6,
+        "lr":1e-5,
         "epoch": 1000,
         "batch_size": 16
         })
@@ -48,15 +48,13 @@ class XmasNetClassifier(pl.LightningModule):
         super().__init__()
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
+            nn.Conv2d(1, 32, 3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(True),
             nn.Conv2d(32, 32, 3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
-        )
-        self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, 3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(True),
@@ -64,25 +62,65 @@ class XmasNetClassifier(pl.LightningModule):
             nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
-        )
-        self.linear = nn.Sequential(
             nn.Flatten(),
             nn.Linear(64 * 8 * 8, 1024),
             nn.ReLU(True),
-            nn.Linear(1024, 256),
-            nn.ReLU(True),
-            nn.Linear(256, 1)
+            nn.Linear(1024, 256)
         )
-        
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, 1024),
+            nn.ReLU(True),
+            nn.Linear(1024, 256)
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            nn.MaxPool2d(2, 2),
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, 1024),
+            nn.ReLU(True),
+            nn.Linear(1024, 256)
+        )
+        self.classifier = nn.Linear(256 * 3, 1)
+
         self.lr = wandb.config.lr
         self.accuracy = lambda x, y: ((x > 0.5).type_as(y) == y).float().mean()
         self.auroc = pl.metrics.functional.classification.auroc
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.linear(x)
-        return x
+        x1 = self.conv1(torch.unsqueeze(x[:,0], 1))
+        x2 = self.conv2(torch.unsqueeze(x[:,1], 1))
+        x3 = self.conv3(torch.unsqueeze(x[:,2], 1))
+        x = torch.cat([x1, x2, x3], dim=1)
+        return self.classifier(x)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
