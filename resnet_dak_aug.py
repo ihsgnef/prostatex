@@ -16,15 +16,23 @@ from pytorch_lightning.loggers import WandbLogger
 
 import wandb
 wandb.init(
+    # mode="offline",
     project="prostatex", 
-    group="resnet-dak-aug-t5",
+    group="resnet-dak-aug-t8",
     config={
         "loss": "binary_cross_entropy",
         "metric": "accuracy",
         "optimizer": "Adam",
         "lr":1e-5,
         "epoch": 1000,
-        "batch_size": 16
+        "batch_size": 16,
+        "augmentation": {
+            "degrees": 50,
+            "translate": (0.1, 0.1),
+            "shear": [-15, 15, -15, 15],
+        },
+        "train_dir": 'dak_images/train',
+        "valid_dir": 'dak_images/valid_bal'
         })
 wandblogger = WandbLogger()
 
@@ -33,13 +41,13 @@ torch.manual_seed(0)
 
 ## Data
 transform = transforms.Compose([
-    transforms.RandomAffine(degrees=50, translate=(0.9, 0.9), shear=[-5, 5, -5, 5]),
+    transforms.RandomAffine(**wandb.config.augmentation),
     transforms.ToTensor()
 ])
 
 datasets = {}
-datasets['train'] = torchvision.datasets.ImageFolder('dak_images/train', transform=transform)
-datasets['valid'] = torchvision.datasets.ImageFolder('dak_images/valid', transform=transforms.ToTensor())
+datasets['train'] = torchvision.datasets.ImageFolder(wandb.config.train_dir, transform=transform)
+datasets['valid'] = torchvision.datasets.ImageFolder(wandb.config.valid_dir, transform=transforms.ToTensor())
 
 
 class Resnet18Classifier(pl.LightningModule):
@@ -57,7 +65,8 @@ class Resnet18Classifier(pl.LightningModule):
         self.classifier = nn.Linear(num_ftrs, 1)
         
         self.lr = wandb.config.lr
-        self.accuracy = pl.metrics.Accuracy()
+        self.accuracy = lambda x, y: ((x > 0.5).type_as(y) == y).float().mean()
+        self.auroc = pl.metrics.functional.classification.auroc
 
     def forward(self, x):
         representations = self.feature_extractor(x)
@@ -66,23 +75,25 @@ class Resnet18Classifier(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        y = y.type_as(y_hat)
+        y = y.type_as(y_hat).unsqueeze(1)
         criterion = nn.BCEWithLogitsLoss()
-        loss = criterion(y_hat, y.unsqueeze(1))
+        loss = criterion(y_hat, y)
         acc = self.accuracy(torch.sigmoid(y_hat), y)
-        self.log('train_loss', loss, on_step=True, sync_dist=True)
-        self.log('train_acc', acc, on_step=True, prog_bar=True)
+        self.log('train_loss', loss, sync_dist=True)
+        self.log('train_acc', acc, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        y = y.type_as(y_hat)
+        y = y.type_as(y_hat).unsqueeze(1)
         criterion = nn.BCEWithLogitsLoss()
-        loss = criterion(y_hat, y.unsqueeze(1))
+        loss = criterion(y_hat, y)
         acc = self.accuracy(torch.sigmoid(y_hat), y)
+        auc = self.auroc(torch.sigmoid(y_hat).squeeze(), y.squeeze())
         self.log('valid_loss', loss, sync_dist=True)
-        self.log('valid_acc', acc, prog_bar=True)
+        self.log('valid_acc', acc, prog_bar=True, sync_dist=True)
+        self.log('valid_auc', auc, prog_bar=True, sync_dist=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -98,7 +109,7 @@ class Resnet18Classifier(pl.LightningModule):
     def val_dataloader(self):
         dataloader = torch.utils.data.DataLoader(
             datasets['valid'], 
-            batch_size=wandb.config.batch_size, 
+            batch_size=64, 
             num_workers=16, drop_last=False)
         return dataloader
 
