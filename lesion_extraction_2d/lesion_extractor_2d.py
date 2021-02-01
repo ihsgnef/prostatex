@@ -13,6 +13,12 @@ class Centroid:
     def __repr__(self):
         return '({}, {}, {})'.format(self.x, self.y, self.z)
 
+    def zoom(self, resolution):
+        self.x = int(self.x * resolution) 
+        self.y = int(self.y * resolution) 
+        self.z = int(self.z * resolution)
+
+
 
 def extract_lesion_2d(img, centroid_position, size=None, realsize=16, imagetype='ADC'):
     if imagetype == 'T2TRA':
