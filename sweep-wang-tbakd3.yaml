@@ -1,0 +1,35 @@
+method: bayes
+metric:
+  goal: minimize
+  name: valid_loss
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  max_iter: 27
+parameters:
+  learning_rate:
+    values: [1e-4, 1e-5, 1e-6]
+  rotate:
+    values: [0, 20, 50, 90]
+  translate:
+    values: [0, 0.1, 0.32, 0.9]
+  shear:
+    values: [0, 5, 15, 30]
+  horizontal_flip:
+    values: [0, 0.5]
+interpreter: /home/hanliu/anaconda3/bin/python
+program: wang.py
+command:
+  - ${interpreter}
+  - ${program}
+  - ${args}
+  - --gpus=-1
+  - --seed=42
+  - --max_epochs=1000
+  - --train_batch_size=16
+  - --eval_batch_size=64
+  - --train_dir=tbakd3_npy/train
+  - --valid_dir=tbakd3_npy/valid_bal
+  - --output_dir=results/wang-tbakd3-sweep
+  - --do_train
