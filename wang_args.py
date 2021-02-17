@@ -20,7 +20,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
-class MSDSC(nn.Module):
+class MSDSC(pl.LightningModule):
     def __init__(self, in_channels):
         super().__init__()
         self.conv1 = nn.Sequential(
@@ -51,20 +51,38 @@ class WangClassifier(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.num_sequences = self.hparams.num_sequences
-        # self.fn_penalty = self.hparams.fn_penalty
-        self.conv = nn.ModuleList(
-            [nn.Sequential(
-                *([MSDSC(16*2**i) for i in range(5)] + [nn.Flatten()])
-            ) for i in range(self.num_sequences)]
-        )
-        self.linear = nn.ModuleList([nn.Linear(16*2**5*2*2, 1) for i in range(self.num_sequences)])
+        self.mri_sequences = self.hparams.mri_sequences
+        self.num_sequences = len(self.hparams.mri_sequences)
+        self.fn_penalty = self.hparams.fn_penalty
+        self.register_buffer("w_ensemble", torch.tensor(
+            [1 / (self.num_sequences + 1)] * (self.num_sequences + 1)))
+        # self.w_ensemble = torch.tensor([1 / (self.num_sequences + 1)] * (self.num_sequences + 1))
+        # self.w_e_table = wandb.Table(columns=["Step"] + list(self.mri_sequences + 'N'))
+
+        self.conv = nn.ModuleList([
+            nn.Sequential(*([MSDSC(16*2**i)
+                             for i in range(5)] + [nn.Flatten()]))
+            for i in range(self.num_sequences)
+        ])
+        self.linear = nn.ModuleList(
+            [nn.Linear(16*2**5*2*2, 1) for i in range(self.num_sequences)])
         self.fusion = nn.Linear(16*2**5*2*2 * self.num_sequences, 1)
+        self.summarize()
+
+    def criterion(self, logits, target):
+        def seq_criterion(l, y, w, C=self.fn_penalty):
+            p, lp, nlp = torch.sigmoid(l), nn.functional.logsigmoid(l), nn.functional.logsigmoid(-l)
+            return -w * (C**(1 - p) * y * lp + (1 - y) * nlp)
+        seq_weight = torch.tensor([0.2] * self.num_sequences + [1], device=self.device)
+        seq_loss = [seq_criterion(logits[:, i], target, seq_weight[i]).unsqueeze(1) for i in range(logits.shape[1])]
+        loss = torch.cat(seq_loss, 1).sum(1).mean()
+        return loss
 
     def metrics(self, prob, target, threshold=0.5):
         pred = (prob >= threshold).long()
         tp, fp, tn, fn, sup = stat_scores(pred, target, class_index=1)
         m = {}
+        m['pred'] = pred
         m['auc'] = auroc(prob, target) if 0 < sup < len(target) else None
         m['acc'] = (tp + tn) / (tp + tn + fp + fn)
         m['tpr'] = tp / (tp + fn)
@@ -74,31 +92,36 @@ class WangClassifier(pl.LightningModule):
         return m
 
     def forward(self, x):
-        conv = [conv(x[:, i].unsqueeze(1).repeat(1, 16, 1, 1)) for i, conv in enumerate(self.conv)]
+        conv = [conv(x[:, i].unsqueeze(1).repeat(1, 16, 1, 1))
+                for i, conv in enumerate(self.conv)]
         conv_x = torch.cat([c.unsqueeze(1) for c in conv], 1)
         linear = [linear(conv_x[:, i]) for i, linear in enumerate(self.linear)]
-        linear_x = torch.cat([l.unsqueeze(1) for l in linear], 1)
-        fusion_x = self.fusion(torch.cat(conv, 1)).unsqueeze(1)
+        linear_x = torch.cat(linear, 1)
+        fusion_x = self.fusion(torch.cat(conv, 1))
         x = torch.cat((linear_x, fusion_x), 1)
-        x = torch.mean(linear_x, 1)
         return x
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = torch.sigmoid(self(x)).view(-1)
-        criterion = nn.BCELoss()
-        loss = criterion(y_hat, y.float())
-        m = self.metrics(y_hat, y)
+        logits = self(x)
+        y_hat = torch.sigmoid(logits)
+        y_hat.require_grad = False
+        loss = self.criterion(logits, y.float())
+        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
         self.log('train_loss', loss, sync_dist=True)
         self.log('train_acc', m['acc'], prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = torch.sigmoid(self(x)).view(-1)
-        criterion = nn.BCELoss()
-        loss = criterion(y_hat, y.float())
-        m = self.metrics(y_hat, y)
+        logits = self(x)
+        y_hat = torch.sigmoid(logits)
+        y_hat.require_grad = False
+        loss = self.criterion(logits, y.float())
+        ms = [self.metrics(y_hat[:, i], y) for i in range(y_hat.shape[1])]
+        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        print("W_en: " + ", ".join(map(lambda x:f"{x:.4f}", self.w_ensemble)))
+        print("Pred: " + "".join(map(str, m['pred'].tolist())))
         self.log('valid_loss', loss, sync_dist=True)
         self.log('valid_acc', m['acc'], prog_bar=True, sync_dist=True)
         self.log('valid_auc', m['auc'], prog_bar=True, sync_dist=True)
@@ -106,6 +129,24 @@ class WangClassifier(pl.LightningModule):
         self.log('valid_specificity', m['tnr'], sync_dist=True)
         self.log('valid_precision', m['ppv'], sync_dist=True)
         self.log('valid_f1', m['f1'], sync_dist=True)
+        for i, m in enumerate(ms):
+            sid = self.mri_sequences[i] if i < self.num_sequences else 'N'
+            self.log(f'seq_{sid}_acc', m['acc'], sync_dist=True)
+            self.log(f'seq_{sid}_auc', m['auc'], sync_dist=True)
+            self.log(f'seq_{sid}_sensitivity', m['tpr'], sync_dist=True)
+            self.log(f'seq_{sid}_specificity', m['tnr'], sync_dist=True)
+            self.log(f'seq_{sid}_precision', m['ppv'], sync_dist=True)
+            self.log(f'seq_{sid}_f1', m['f1'], sync_dist=True)
+        s_bar = torch.tensor([m['auc'] for m in ms], device=self.device).mean()
+        ss = torch.tensor([m['auc'] for m in ms], device=self.device)
+        w_e = (ss.clamp(min=s_bar) - s_bar).type_as(ss)
+        if w_e.sum() > 0: 
+            self.w_ensemble = w_e / w_e.sum()
+        w_e_columns = ["Step"] + list(self.mri_sequences + 'N')
+        w_e_data = [self.global_step] + [f"{w:.4f}" for w in self.w_ensemble]
+        wandb.log({"wEnsemble": wandb.Table(data=w_e_data, columns=w_e_columns)}, step=self.global_step)
+        # self.table.add_data(*w_e_data)
+        # wandb.log({"w_ensemble": self.w_e_table}, step=self.global_step)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
@@ -146,16 +187,17 @@ class WangClassifier(pl.LightningModule):
         dataset = torchvision.datasets.DatasetFolder(
             self.hparams.valid_dir, extensions='npy', loader=np.load, transform=transforms.ToTensor()
             )
+        batch_size = len(dataset) if self.hparams.eval_batch_size == -1 else self.hparams.eval_batch_size
         dataloader = torch.utils.data.DataLoader(
             dataset, 
-            batch_size=self.hparams.eval_batch_size, 
+            batch_size=batch_size, 
             num_workers=self.hparams.dataloader_num_workers, 
             drop_last=False, shuffle=False)
         return dataloader
 
     @staticmethod
     def add_model_specific_args(parser, root_dir):
-        parser.add_argument("--num_sequences", default=7, type=int, help="Number of MRI sequences")
+        parser.add_argument("--mri_sequences", default=None, type=str, required=True)
         parser.add_argument("--fn_penalty", default=20, type=int, help="Penalty for false negatives")
         parser.add_argument("--horizontal_flip", default=0, type=float)
         parser.add_argument("--vertical_flip", default=0, type=float)
@@ -208,6 +250,7 @@ def train(
 
     trainer = pl.Trainer.from_argparse_args(
         args,
+        auto_select_gpus=True,
         weights_summary=None,
         callbacks=extra_callbacks,
         logger=logger,
@@ -219,7 +262,7 @@ def train(
         trainer.fit(model)
         # save best model to `best_model.ckpt`
         target_path = os.path.join(ckpt_path, 'best_model.ckpt')
-        logger.info(f"Copy best model from {checkpoint_callback.best_model_path} to {target_path}.")
+        print(f"Copy best model from {checkpoint_callback.best_model_path} to {target_path}.")
         shutil.copy(checkpoint_callback.best_model_path, target_path)
 
     return trainer
