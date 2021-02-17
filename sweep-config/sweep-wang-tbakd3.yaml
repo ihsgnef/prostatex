@@ -24,6 +24,7 @@ command:
   - ${interpreter}
   - ${program}
   - ${args}
+  - --wandb_group=wang-tbakd3-sweep
   - --gpus=-1
   - --seed=42
   - --max_epochs=1000
