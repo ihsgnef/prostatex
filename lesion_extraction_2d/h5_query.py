@@ -10,7 +10,7 @@ def dicom_series_query(h5_file, query_words):
         for patient_id in h5_file.keys()  # For all patients
         for dcm_series in h5_file[patient_id].keys()  # For all DICOM series
         for word in query_words  # For every word in query words
-        if word in dcm_series  # The word is present in DICOM series name
+        if all(ss.lower() in dcm_series.lower() for ss in word.split("_"))  # The word is present in DICOM series name
         ]
     return query_result
 
