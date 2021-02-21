@@ -25,14 +25,14 @@ class MSDSC(pl.LightningModule):
         super().__init__()
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels),
-            nn.Conv2d(in_channels, in_channels, 1)
+            nn.Conv2d(in_channels, in_channels // 2, 1)
         )
         self.conv2 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 5, padding=2, groups=in_channels),
-            nn.Conv2d(in_channels, in_channels, 1)
+            nn.Conv2d(in_channels, in_channels // 2, 1)
         )
         self.layer = nn.Sequential(
-            nn.BatchNorm2d(in_channels * 2),
+            nn.BatchNorm2d(in_channels),
             nn.ReLU(),
             nn.MaxPool2d(2)
         )
@@ -53,20 +53,18 @@ class WangClassifier(pl.LightningModule):
 
         self.mri_sequences = self.hparams.mri_sequences
         self.num_sequences = len(self.hparams.mri_sequences)
+        self.data_sequences = self.hparams.data_sequences
+        self.mri_index = [self.data_sequences.find(s) for s in self.mri_sequences]
         self.fn_penalty = self.hparams.fn_penalty
         self.register_buffer("w_ensemble", torch.tensor(
             [1 / (self.num_sequences + 1)] * (self.num_sequences + 1)))
-        # self.w_ensemble = torch.tensor([1 / (self.num_sequences + 1)] * (self.num_sequences + 1))
-        # self.w_e_table = wandb.Table(columns=["Step"] + list(self.mri_sequences + 'N'))
 
-        self.conv = nn.ModuleList([
-            nn.Sequential(*([MSDSC(16*2**i)
-                             for i in range(5)] + [nn.Flatten()]))
-            for i in range(self.num_sequences)
-        ])
-        self.linear = nn.ModuleList(
-            [nn.Linear(16*2**5*2*2, 1) for i in range(self.num_sequences)])
-        self.fusion = nn.Linear(16*2**5*2*2 * self.num_sequences, 1)
+        self.conv = nn.ModuleList([nn.Sequential(
+            *([MSDSC(16) for i in range(5)] + [nn.Flatten()])) for j in range(self.num_sequences)])
+        self.linear = nn.ModuleList([nn.Sequential(nn.Linear(
+            16*2*2, 64), nn.ReLU(), nn.Linear(64, 1)) for i in range(self.num_sequences)])
+        self.fusion = nn.Sequential(
+            nn.Linear(16*2*2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, 1))
         self.summarize()
 
     def criterion(self, logits, target):
@@ -103,6 +101,7 @@ class WangClassifier(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
+        x = x[:, self.mri_index]
         logits = self(x)
         y_hat = torch.sigmoid(logits)
         y_hat.require_grad = False
@@ -114,6 +113,7 @@ class WangClassifier(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+        x = x[:, self.mri_index]
         logits = self(x)
         y_hat = torch.sigmoid(logits)
         y_hat.require_grad = False
@@ -145,8 +145,6 @@ class WangClassifier(pl.LightningModule):
         w_e_columns = ["Step"] + list(self.mri_sequences + 'N')
         w_e_data = [self.global_step] + [f"{w:.4f}" for w in self.w_ensemble]
         wandb.log({"wEnsemble": wandb.Table(data=w_e_data, columns=w_e_columns)}, step=self.global_step)
-        # self.table.add_data(*w_e_data)
-        # wandb.log({"w_ensemble": self.w_e_table}, step=self.global_step)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
@@ -198,6 +196,7 @@ class WangClassifier(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parser, root_dir):
         parser.add_argument("--mri_sequences", default=None, type=str, required=True)
+        parser.add_argument("--data_sequences", default=None, type=str, required=True)
         parser.add_argument("--fn_penalty", default=20, type=int, help="Penalty for false negatives")
         parser.add_argument("--horizontal_flip", default=0, type=float)
         parser.add_argument("--vertical_flip", default=0, type=float)
@@ -240,7 +239,7 @@ def train(
     )
     if checkpoint_callback is None:
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=ckpt_path, filename="{epoch}-{valid_auc:.2f}", monitor="valid_auc", mode="max", save_top_k=1, verbose=True
+            dirpath=ckpt_path, filename="{epoch}-{valid_acc:.2f}", monitor="valid_acc", mode="max", save_top_k=2, verbose=True
         )
 
     train_params = {}
