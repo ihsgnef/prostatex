@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
 import pytorch_lightning as pl
-from pytorch_lightning.metrics.functional.classification import auroc, stat_scores
+from pytorch_lightning.metrics.functional.classification import auroc, stat_scores, average_precision, precision_recall_curve, auc
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -47,7 +47,7 @@ class MSDSC(pl.LightningModule):
 
 class WangClassifier(pl.LightningModule):
 
-    def __init__(self, **config_kwargs):
+    def __init__(self, verbose=False, **config_kwargs):
         super().__init__()
         self.save_hyperparameters()
 
@@ -57,7 +57,7 @@ class WangClassifier(pl.LightningModule):
         self.mri_index = [self.data_sequences.find(s) for s in self.mri_sequences]
         self.fn_penalty = self.hparams.fn_penalty
         self.register_buffer("w_ensemble", torch.tensor(
-            [1 / (self.num_sequences + 1)] * (self.num_sequences + 1)))
+            [1 / (self.num_sequences + 1)] * (self.num_sequences + 1), requires_grad=False))
 
         self.conv = nn.ModuleList([nn.Sequential(
             *([MSDSC(16) for i in range(5)] + [nn.Flatten()])) for j in range(self.num_sequences)])
@@ -65,7 +65,8 @@ class WangClassifier(pl.LightningModule):
             16*2*2, 64), nn.ReLU(), nn.Linear(64, 1)) for i in range(self.num_sequences)])
         self.fusion = nn.Sequential(
             nn.Linear(16*2*2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, 1))
-        self.summarize()
+        if verbose: 
+            self.summarize()
 
     def criterion(self, logits, target):
         def seq_criterion(l, y, w, C=self.fn_penalty):
@@ -79,6 +80,9 @@ class WangClassifier(pl.LightningModule):
     def metrics(self, prob, target, threshold=0.5):
         pred = (prob >= threshold).long()
         tp, fp, tn, fn, sup = stat_scores(pred, target, class_index=1)
+        if 0 < sup < len(target):
+            precision, recall, _ = precision_recall_curve(pred, target)
+            auprc = auc(recall, precision)
         m = {}
         m['pred'] = pred
         m['auc'] = auroc(prob, target) if 0 < sup < len(target) else None
@@ -87,6 +91,8 @@ class WangClassifier(pl.LightningModule):
         m['tnr'] = tn / (tn + fp)
         m['ppv'] = tp / (tp + fp)
         m['f1'] = 2 * tp / (2 * tp + fp + fn)
+        m['ap'] = average_precision(prob, target)
+        m['auprc'] = auprc if 0 < sup < len(target) else None
         return m
 
     def forward(self, x):
@@ -106,7 +112,8 @@ class WangClassifier(pl.LightningModule):
         y_hat = torch.sigmoid(logits)
         y_hat.require_grad = False
         loss = self.criterion(logits, y.float())
-        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        # m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        m = self.metrics(y_hat.mean(axis=1), y)
         self.log('train_loss', loss, sync_dist=True)
         self.log('train_acc', m['acc'], prog_bar=True, sync_dist=True)
         return loss
@@ -119,7 +126,8 @@ class WangClassifier(pl.LightningModule):
         y_hat.require_grad = False
         loss = self.criterion(logits, y.float())
         ms = [self.metrics(y_hat[:, i], y) for i in range(y_hat.shape[1])]
-        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        # m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        m = self.metrics(y_hat.mean(axis=1), y)
         print("W_en: " + ", ".join(map(lambda x:f"{x:.4f}", self.w_ensemble)))
         print("Pred: " + "".join(map(str, m['pred'].tolist())))
         self.log('valid_loss', loss, sync_dist=True)
@@ -145,6 +153,17 @@ class WangClassifier(pl.LightningModule):
         w_e_columns = ["Step"] + list(self.mri_sequences + 'N')
         w_e_data = [self.global_step] + [f"{w:.4f}" for w in self.w_ensemble]
         wandb.log({"wEnsemble": wandb.Table(data=w_e_data, columns=w_e_columns)}, step=self.global_step)
+
+    def predict(self, batch, multi=False, ensemble=True, prob=True, threshold=0.5):
+        x = batch[:, self.mri_index]
+        logits = self(x)
+        y_hat = torch.sigmoid(logits)
+        if multi: 
+            return y_hat
+        pred = y_hat.matmul(self.w_ensemble) if ensemble else y_hat.mean(axis=1)
+        if not prob: 
+            pred = (prob >= threshold).long()
+        return pred
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
@@ -239,7 +258,7 @@ def train(
     )
     if checkpoint_callback is None:
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=ckpt_path, filename="{epoch}-{valid_acc:.2f}", monitor="valid_acc", mode="max", save_top_k=2, verbose=True
+            dirpath=ckpt_path, filename="{epoch}-{valid_auc:.2f}", monitor="valid_auc", mode="max", save_last=True, save_top_k=5, verbose=True
         )
 
     train_params = {}
