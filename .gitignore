@@ -95,3 +95,11 @@ ENV/
 data_visualization/img/
 
 **.*hdf5
+
+.vscode
+dak_images
+dak_images_bak
+tak_npy
+tbakd3_npy
+tbakd3_npy.spline
+lightning_logs
