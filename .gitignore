@@ -94,12 +94,20 @@ ENV/
 # Lesion info plots
 data_visualization/img/
 
+# data, logs, and results
 **.*hdf5
+*.tar.gz
+*.csv
+*.sh
+*.pkl
 
 .vscode
 dak_images
 dak_images_bak
 tak_npy
+tbak_npy
 tbakd3_npy
 tbakd3_npy.spline
 lightning_logs
+prostatex
+results
