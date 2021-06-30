@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore")
 
 
 class MSDSC(pl.LightningModule):
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, pooling=True):
         super().__init__()
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels),
@@ -34,7 +34,7 @@ class MSDSC(pl.LightningModule):
         self.layer = nn.Sequential(
             nn.BatchNorm2d(in_channels),
             nn.ReLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2) if pooling else nn.Identity()
         )
 
     def forward(self, x):
@@ -59,12 +59,13 @@ class WangClassifier(pl.LightningModule):
         self.register_buffer("w_ensemble", torch.tensor(
             [1 / (self.num_sequences + 1)] * (self.num_sequences + 1), requires_grad=False))
 
+        out_size = 2 if self.hparams.pooling else 64
         self.conv = nn.ModuleList([nn.Sequential(
-            *([MSDSC(16) for i in range(5)] + [nn.Flatten()])) for j in range(self.num_sequences)])
+            *([MSDSC(16, self.hparams.pooling) for i in range(5)] + [nn.Flatten()])) for j in range(self.num_sequences)])
         self.linear = nn.ModuleList([nn.Sequential(nn.Linear(
-            16*2*2, 64), nn.ReLU(), nn.Linear(64, 1)) for i in range(self.num_sequences)])
+            16 * out_size**2, 64), nn.ReLU(), nn.Linear(64, 1)) for i in range(self.num_sequences)])
         self.fusion = nn.Sequential(
-            nn.Linear(16*2*2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, 1))
+            nn.Linear(16 * out_size**2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, 1))
         if verbose: 
             self.summarize()
 
@@ -112,8 +113,8 @@ class WangClassifier(pl.LightningModule):
         y_hat = torch.sigmoid(logits)
         y_hat.require_grad = False
         loss = self.criterion(logits, y.float())
-        # m = self.metrics(y_hat.matmul(self.w_ensemble), y)
-        m = self.metrics(y_hat.mean(axis=1), y)
+        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        # m = self.metrics(y_hat.mean(axis=1), y)
         self.log('train_loss', loss, sync_dist=True)
         self.log('train_acc', m['acc'], prog_bar=True, sync_dist=True)
         return loss
@@ -126,8 +127,8 @@ class WangClassifier(pl.LightningModule):
         y_hat.require_grad = False
         loss = self.criterion(logits, y.float())
         ms = [self.metrics(y_hat[:, i], y) for i in range(y_hat.shape[1])]
-        # m = self.metrics(y_hat.matmul(self.w_ensemble), y)
-        m = self.metrics(y_hat.mean(axis=1), y)
+        m = self.metrics(y_hat.matmul(self.w_ensemble), y)
+        # m = self.metrics(y_hat.mean(axis=1), y)
         print("W_en: " + ", ".join(map(lambda x:f"{x:.4f}", self.w_ensemble)))
         print("Pred: " + "".join(map(str, m['pred'].tolist())))
         self.log('valid_loss', loss, sync_dist=True)
@@ -137,6 +138,8 @@ class WangClassifier(pl.LightningModule):
         self.log('valid_specificity', m['tnr'], sync_dist=True)
         self.log('valid_precision', m['ppv'], sync_dist=True)
         self.log('valid_f1', m['f1'], sync_dist=True)
+        self.log('valid_ap', m['ap'], sync_dist=True)
+        self.log('valid_auprc', m['auprc'], sync_dist=True)
         for i, m in enumerate(ms):
             sid = self.mri_sequences[i] if i < self.num_sequences else 'N'
             self.log(f'seq_{sid}_acc', m['acc'], sync_dist=True)
@@ -145,6 +148,8 @@ class WangClassifier(pl.LightningModule):
             self.log(f'seq_{sid}_specificity', m['tnr'], sync_dist=True)
             self.log(f'seq_{sid}_precision', m['ppv'], sync_dist=True)
             self.log(f'seq_{sid}_f1', m['f1'], sync_dist=True)
+            self.log(f'seq_{sid}_ap', m['ap'], sync_dist=True)
+            self.log(f'seq_{sid}_auprc', m['auprc'], sync_dist=True)
         s_bar = torch.tensor([m['auc'] for m in ms], device=self.device).mean()
         ss = torch.tensor([m['auc'] for m in ms], device=self.device)
         w_e = (ss.clamp(min=s_bar) - s_bar).type_as(ss)
@@ -153,6 +158,11 @@ class WangClassifier(pl.LightningModule):
         w_e_columns = ["Step"] + list(self.mri_sequences + 'N')
         w_e_data = [self.global_step] + [f"{w:.4f}" for w in self.w_ensemble]
         wandb.log({"wEnsemble": wandb.Table(data=w_e_data, columns=w_e_columns)}, step=self.global_step)
+
+    def embed(self, x):
+        conv = [conv(x[:, i].unsqueeze(1).repeat(1, 16, 1, 1))
+                for i, conv in enumerate(self.conv)]
+        return torch.cat(conv, 1)
 
     def predict(self, batch, multi=False, ensemble=True, prob=True, threshold=0.5):
         x = batch[:, self.mri_index]
@@ -200,7 +210,7 @@ class WangClassifier(pl.LightningModule):
             drop_last=True, shuffle=True)
         return dataloader
 
-    def val_dataloader(self):
+    def valid_dataloader(self):
         dataset = torchvision.datasets.DatasetFolder(
             self.hparams.valid_dir, extensions='npy', loader=np.load, transform=transforms.ToTensor()
             )
@@ -216,6 +226,7 @@ class WangClassifier(pl.LightningModule):
     def add_model_specific_args(parser, root_dir):
         parser.add_argument("--mri_sequences", default=None, type=str, required=True)
         parser.add_argument("--data_sequences", default=None, type=str, required=True)
+        parser.add_argument("--pooling", action="store_true")
         parser.add_argument("--fn_penalty", default=20, type=int, help="Penalty for false negatives")
         parser.add_argument("--horizontal_flip", default=0, type=float)
         parser.add_argument("--vertical_flip", default=0, type=float)
@@ -258,7 +269,7 @@ def train(
     )
     if checkpoint_callback is None:
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=ckpt_path, filename="{epoch}-{valid_auc:.2f}", monitor="valid_auc", mode="max", save_last=True, save_top_k=5, verbose=True
+            dirpath=ckpt_path, filename="{epoch}-{valid_auc:.2f}", monitor="valid_auc", mode="max", save_last=True, save_top_k=3, verbose=True
         )
 
     train_params = {}
