@@ -98,7 +98,6 @@ data_visualization/img/
 **.*hdf5
 *.tar.gz
 *.csv
-*.sh
 *.pkl
 
 .vscode
