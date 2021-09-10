@@ -28,9 +28,12 @@ export tzn=ABFT
   --mri_sequences=$msin \
   --data_sequences=TBAKDEF \
   --embed_dim=10 \
+  --merge_dim=80 \
+  --merge_seq \
+  --pooling \
   --wandb_mode=online \
-  --wandb_group=dwac-emb10-merge \
-  --output_dir=results/dwac-emb10-merge \
+  --wandb_group=dwac-emb10-merge80 \
+  --output_dir=results/dwac-emb10-merge80 \
   --train_dir=tbakd3_npy/5folds/$FOLD/train \
   --valid_dir=tbakd3_npy/5folds/$FOLD/valid \
   --dataloader_num_workers=8 \
@@ -42,6 +45,4 @@ export tzn=ABFT
   --rotate=30 \
   --scale=0.2 \
   --train_batch_size=16 \
-  --do_train \
-  --pooling \
-  --merge_seq
+  --do_train

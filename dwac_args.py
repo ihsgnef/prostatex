@@ -67,10 +67,11 @@ class DWAC(pl.LightningModule):
             16 * out_size**2, 64), nn.ReLU(), nn.Linear(64, self.embed_dim)) for i in range(self.num_sequences)])
         self.fusion = nn.Sequential(
             nn.Linear(16 * out_size**2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, self.embed_dim))
-        self.merger = nn.Sequential(nn.ReLU(), nn.Linear(self.embed_dim * (self.num_sequences+1), self.embed_dim)) if self.hparams.merge_seq else nn.Identity()
-        if self.embed_dim > 1:
-            self.classifier = nn.ModuleList([nn.Sequential(nn.ReLU(), nn.Linear(
-                self.embed_dim, 1)) for i in range(self.num_sequences + 1)])
+        if self.hparams.merge_seq:
+            self.merge_dim = self.hparams.merge_dim 
+            self.merger = nn.Sequential(nn.ReLU(), nn.Linear(self.embed_dim * (self.num_sequences+1), self.merge_dim))
+        else: 
+            self.merger = nn.Identity()
 
         if self.hparams.kernel == 'laplace':
             print("Using Laplace kernel")
@@ -284,6 +285,7 @@ class DWAC(pl.LightningModule):
         parser.add_argument("--pooling", action="store_true")
         parser.add_argument("--merge_seq", action="store_true")
         parser.add_argument("--embed_dim", default=10, type=int, help="Embedding size")
+        parser.add_argument("--merge_dim", default=10, type=int, help="Embedding size")
         parser.add_argument('--kernel', type=str, default='gaussian', help='hparam for kernel [guassian|laplace|invquad]')
         parser.add_argument('--gamma', type=float, default=1.0, help='hparam for kernel')
         parser.add_argument('--eps', type=float, default=1e-12, help='label smoothing factor for learning')

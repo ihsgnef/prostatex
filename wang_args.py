@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torchvision
 from torchvision import transforms
 import pytorch_lightning as pl
-from pytorch_lightning.metrics.functional.classification import auroc, stat_scores, average_precision, precision_recall_curve, auc
+from torchmetrics.functional.classification import auroc, stat_scores, average_precision, precision_recall_curve, auc
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -56,6 +56,7 @@ class WangClassifier(pl.LightningModule):
         self.data_sequences = self.hparams.data_sequences
         self.mri_index = [self.data_sequences.find(s) for s in self.mri_sequences]
         self.fn_penalty = self.hparams.fn_penalty
+        self.embed_dim = self.hparams.embed_dim
         self.register_buffer("w_ensemble", torch.tensor(
             [1 / (self.num_sequences + 1)] * (self.num_sequences + 1), requires_grad=False))
 
@@ -63,9 +64,12 @@ class WangClassifier(pl.LightningModule):
         self.conv = nn.ModuleList([nn.Sequential(
             *([MSDSC(16, self.hparams.pooling) for i in range(5)] + [nn.Flatten()])) for j in range(self.num_sequences)])
         self.linear = nn.ModuleList([nn.Sequential(nn.Linear(
-            16 * out_size**2, 64), nn.ReLU(), nn.Linear(64, 1)) for i in range(self.num_sequences)])
+            16 * out_size**2, 64), nn.ReLU(), nn.Linear(64, self.embed_dim)) for i in range(self.num_sequences)])
         self.fusion = nn.Sequential(
-            nn.Linear(16 * out_size**2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, 1))
+            nn.Linear(16 * out_size**2 * self.num_sequences, 64), nn.ReLU(), nn.Linear(64, self.embed_dim))
+        if self.embed_dim > 1:
+            self.classifier = nn.ModuleList([nn.Sequential(nn.ReLU(), nn.Linear(
+                self.embed_dim, 1)) for i in range(self.num_sequences + 1)])
         if verbose: 
             self.summarize()
 
@@ -80,7 +84,7 @@ class WangClassifier(pl.LightningModule):
 
     def metrics(self, prob, target, threshold=0.5):
         pred = (prob >= threshold).long()
-        tp, fp, tn, fn, sup = stat_scores(pred, target, class_index=1)
+        tp, fp, tn, fn, sup = stat_scores(pred, target, ignore_index=0)
         if 0 < sup < len(target):
             precision, recall, _ = precision_recall_curve(pred, target)
             auprc = auc(recall, precision)
@@ -101,9 +105,15 @@ class WangClassifier(pl.LightningModule):
                 for i, conv in enumerate(self.conv)]
         conv_x = torch.cat([c.unsqueeze(1) for c in conv], 1)
         linear = [linear(conv_x[:, i]) for i, linear in enumerate(self.linear)]
-        linear_x = torch.cat(linear, 1)
-        fusion_x = self.fusion(torch.cat(conv, 1))
-        x = torch.cat((linear_x, fusion_x), 1)
+        if self.embed_dim > 1:
+            fusion = self.fusion(torch.cat(conv, 1))
+            x = linear + [fusion]
+            x = [clf(x[i]) for i, clf in enumerate(self.classifier)]
+            x = torch.cat(x, 1)
+        else:
+            linear_x = torch.cat(linear, 1)
+            fusion_x = self.fusion(torch.cat(conv, 1))
+            x = torch.cat((linear_x, fusion_x), 1)
         return x
 
     def training_step(self, batch, batch_idx):
@@ -158,11 +168,20 @@ class WangClassifier(pl.LightningModule):
         w_e_columns = ["Step"] + list(self.mri_sequences + 'N')
         w_e_data = [self.global_step] + [f"{w:.4f}" for w in self.w_ensemble]
         wandb.log({"wEnsemble": wandb.Table(data=w_e_data, columns=w_e_columns)}, step=self.global_step)
+        return {'valid_auc': m['auc']}
 
     def embed(self, x):
+        x = x[:, self.mri_index]
         conv = [conv(x[:, i].unsqueeze(1).repeat(1, 16, 1, 1))
                 for i, conv in enumerate(self.conv)]
-        return torch.cat(conv, 1)
+        embeds = torch.cat(conv, 1)
+        if self.embed_dim > 1:
+            conv_x = torch.cat([c.unsqueeze(1) for c in conv], 1)
+            linear = [linear(conv_x[:, i]) for i, linear in enumerate(self.linear)]
+            linear_x = torch.cat(linear, 1)
+            fusion_x = self.fusion(torch.cat(conv, 1))
+            embeds = torch.cat((linear_x, fusion_x), 1)
+        return embeds
 
     def predict(self, batch, multi=False, ensemble=True, prob=True, threshold=0.5):
         x = batch[:, self.mri_index]
@@ -210,7 +229,7 @@ class WangClassifier(pl.LightningModule):
             drop_last=True, shuffle=True)
         return dataloader
 
-    def valid_dataloader(self):
+    def val_dataloader(self):
         dataset = torchvision.datasets.DatasetFolder(
             self.hparams.valid_dir, extensions='npy', loader=np.load, transform=transforms.ToTensor()
             )
@@ -228,6 +247,7 @@ class WangClassifier(pl.LightningModule):
         parser.add_argument("--data_sequences", default=None, type=str, required=True)
         parser.add_argument("--pooling", action="store_true")
         parser.add_argument("--fn_penalty", default=20, type=int, help="Penalty for false negatives")
+        parser.add_argument("--embed_dim", default=1, type=int, help="Embedding size")
         parser.add_argument("--horizontal_flip", default=0, type=float)
         parser.add_argument("--vertical_flip", default=0, type=float)
         parser.add_argument("--rotate", default=0, type=int)
@@ -269,7 +289,7 @@ def train(
     )
     if checkpoint_callback is None:
         checkpoint_callback = pl.callbacks.ModelCheckpoint(
-            dirpath=ckpt_path, filename="{epoch}-{valid_auc:.2f}", monitor="valid_auc", mode="max", save_last=True, save_top_k=3, verbose=True
+            dirpath=ckpt_path, filename="{epoch}-{valid_loss:.2f}", monitor="valid_loss", mode="min", save_last=True, save_top_k=3, verbose=True
         )
 
     train_params = {}
@@ -281,9 +301,8 @@ def train(
         args,
         auto_select_gpus=True,
         weights_summary=None,
-        callbacks=extra_callbacks,
+        callbacks=extra_callbacks + [checkpoint_callback],
         logger=logger,
-        checkpoint_callback=checkpoint_callback,
         **train_params,
     )
 
