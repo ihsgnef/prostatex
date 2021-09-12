@@ -24,7 +24,7 @@ export tzn=ABFT
 
 # nvidia-smi -l 1 &
 
-/home/hanliu/anaconda3/bin/python wang_args.py \
+python wang_args.py \
   --mri_sequences=$msin \
   --data_sequences=TBAKDEF \
   --fn_penalty=20 \
